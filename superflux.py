@@ -213,9 +213,11 @@ class Spectrogram(object):
         if mul <= 0:
             raise ValueError("a positive value must be multiplied before "
                              "taking the logarithm")
-        self.hop_size = rate // fps
-        self.num_frames = audio.shape[-1] // self.hop_size
-        self.num_fft_bins = int(frame_size / 2) + 1
+        self.hop_size = rate / fps
+        print("HOPSIZE", self.hop_size)
+        self.num_frames = int(math.ceil(audio.shape[-1] / self.hop_size))
+        print("NUMFRAMES", self.num_frames)
+        self.num_fft_bins = int(frame_size / 2) # TODO pourquoi cette diff de +1 ?
         self.num_bins = self.num_fft_bins
         if filterbank is None:
             self.spec = torch.empty((self.num_frames, self.num_fft_bins), dtype=torch.float32)
@@ -228,7 +230,9 @@ class Spectrogram(object):
         if lgd:
             warnings.warn("Local group delay not implemented yet.", UserWarning)
         self.window = torch.hann_window(frame_size)
-        transform = torchaudio.transforms.Spectrogram(frame_size, frame_size, self.hop_size, power=1,
+        
+        transform = torchaudio.transforms.Spectrogram(frame_size, frame_size, int(self.hop_size), power=1,
+                                                      pad_mode='constant',
                                                       window_fn=lambda size: torch.hann_window(size, device=audio.device))
         stft = transform(audio)
         stft = torch.abs(stft)
