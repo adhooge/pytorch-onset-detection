@@ -9,7 +9,7 @@ import numpy as np
 import torch, torchaudio
 
 
-def maximum_filter(input, size, mode: str = 'constant', origin: list = [0, 0]):
+def maximum_filter(input, size, mode: str = 'reflect', origin: list = [0, 0]):
     """
     Apply maximum filtering with kernels of size `size` like
     scipy.ndimage.maximum_filter
@@ -18,8 +18,8 @@ def maximum_filter(input, size, mode: str = 'constant', origin: list = [0, 0]):
     :param size: tuple representing the size of the filter kernels.
     :return:
     """
-    if mode != 'constant':
-        raise NotImplementedError("Only constant zero padding is available now")
+    if mode != 'constant' and mode != 'reflect':
+        raise NotImplementedError("Only constant and reflect are available for now")
     tensor_size = torch.tensor(size)
     origin = torch.tensor(origin)
     pad_length_start = origin + tensor_size // 2
@@ -27,6 +27,7 @@ def maximum_filter(input, size, mode: str = 'constant', origin: list = [0, 0]):
     # Prepare tensor
     padded_input = torch.zeros((input.shape[0], input.shape[1] + pad_length_start[0] + pad_length_end[0],
                                 input.shape[2] + pad_length_start[1] + pad_length_end[1]), device=input.device)
+    print(padded_input.shape)
     # fill values
     if pad_length_start[0] == 0 and pad_length_end[0] == 0:
         padded_input[:, :, pad_length_start[1]:-pad_length_end[1]] = input
@@ -35,6 +36,27 @@ def maximum_filter(input, size, mode: str = 'constant', origin: list = [0, 0]):
     else:
         padded_input[:, pad_length_start[0]:-pad_length_end[0],
         pad_length_start[1]:-pad_length_end[1]] = input
+    if mode == 'reflect':
+        if not pad_length_end[0] == 0 and not pad_length_start[0] == 0:
+            reflection = torch.flip(input, [1])
+            padded_input[:, :pad_length_start[0], 
+                    pad_length_start[1]:-pad_length_end[1]] = reflection[:, -pad_length_start[0]:, :]
+            padded_input[:, -pad_length_end[0]:, 
+                    pad_length_start[1]:-pad_length_end[1]] = reflection[:, :pad_length_end[0]:, :]
+        if not pad_length_end[1] == 0 and not pad_length_start[1] == 0:
+            reflection = torch.flip(input, [2])
+            try:
+                padded_input[:, pad_length_start[0]:-pad_length_end[0],
+                        :pad_length_start[1]] = reflection[:, :, -pad_length_start[1]:]
+                padded_input[:, pad_length_start[0]:-pad_length_end[0],
+                        -pad_length_end[1]:] = reflection[:, :, :pad_length_end[1]]
+            except RuntimeError:
+                # TODO make it cleaner somehow?
+                padded_input[:, :,
+                        :pad_length_start[1]] = reflection[:, :, -pad_length_start[1]:]
+                padded_input[:, :,
+                        -pad_length_end[1]:] = reflection[:, :, :pad_length_end[1]]
+
     max_input = torch.nn.functional.max_pool2d(padded_input, size, stride=1)
     return max_input
 
@@ -130,7 +152,7 @@ class Filter(object):
         Calculates a triangular filter of the given size.
         :param start: start bin (with value 0, included in the filter)
         :param mid:   center bin (of height 1, unless norm is True)
-        :param stop:  end bin (with value 0, not included in the filter)
+        :param stop::  end bin (with value 0, not included in the filter)
         :param equal: normalize the area of the filter to 1
         :returns:     a triangular shaped filter
         """
@@ -204,6 +226,7 @@ class Spectrogram(object):
                            ComplexFlux algorithm)
         """
         self.audio = audio
+        print("AUDIO", self.audio) #OK aux arrondis près
         self.rate = rate
         self.fps = fps
         self.filterbank = filterbank
@@ -242,6 +265,9 @@ class Spectrogram(object):
             self.spec = torch.matmul(torch.transpose(stft, 1, 2), filterbank)
         if log:
             self.spec = torch.log10(mul * self.spec + add)
+        print("STFT shape", self.spec.shape)
+        print("STFT TYPE", self.spec.dtype)
+        print("FIRST FRAME", self.spec[0, 0,:])
 
 
 class SpectralODF(object):
@@ -310,10 +336,13 @@ class SpectralODF(object):
         if spec.ndim == 2:
             spec = spec[None, :, :]
         max_spec = maximum_filter(spec, size=[1, max_bins])
+        print("MAXSPEC SHAPE", max_spec.shape)
         # calculate the diff
         diff_spec[:, diff_frames:] = spec[:, diff_frames:] - max_spec[:, 0:-diff_frames]
+        print("DIFFSPEC SHAPE", diff_spec.shape)
         # keep only positive values
         diff_spec = torch.nn.functional.relu(diff_spec)
+        print("DIFFSPEC SHAPE", diff_spec.shape)
         # return diff spec
         return diff_spec
 
@@ -331,7 +360,7 @@ class SpectralODF(object):
         diff_spec = self._superflux_diff_spec(self.s.spec, self.diff_frames,
                                               self.max_bins)
         # sum all positive 1st order max. filtered differences
-        return torch.sum(diff_spec, axis=1)
+        return torch.sum(diff_spec, axis=2)
 
 
 class Onset(object):
@@ -361,8 +390,8 @@ class Onset(object):
             # read in the activations from a file
             self.load(activations, sep)
 
-    def detect(self, threshold, combine=30, pre_avg=0.15, pre_max=0.01,
-               post_avg=0, post_max=0.05, delay=0, num_onset=None):
+    def detect(self, threshold, combine: float = 30, pre_avg: float = 0.15, pre_max: float = 0.01,
+            post_avg: float = 0, post_max: float = 0.05, delay: float = 0, num_onset=None):
         """
         Detects the onsets.
         :param threshold: threshold for peak-picking
@@ -436,7 +465,7 @@ class Onset(object):
             # filter all detections which occur within `combine` seconds
             # combined_detections = detections[:, 1:][torch.diff(detections) > combine]
             combined_detections = torch.where(torch.diff(detections) > combine,
-                                              detections[:, 1:], torch.scalar_tensor(999, device=detections.device))
+                                              detections[:, 1:], torch.scalar_tensor(-1, device=detections.device))
             # combined_activations = onset_activations[:, 1:][torch.diff(detections) > combine]
             combined_activations = torch.where(torch.diff(detections) > combine,
                                                onset_activations[:, 1:], torch.scalar_tensor(0, device=onset_activations.device))
